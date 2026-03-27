@@ -32,7 +32,7 @@ async def get_user_posts(username: str) -> list:
         raise Exception(f"API error: {response.status_code} - {response.text}")
 
     result = response.json()
-    raise Exception(f"RAW RESPONSE: {str(result)[:500]}")
+    return result.get("posts", [])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -61,23 +61,40 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = 0
         for post in posts:
             try:
-                is_video = post.get("media_type") == 2
+                node = post.get("node", {})
+
+                # Check if video
+                is_video = node.get("is_video", False)
+
                 if is_video:
-                    media_url = post.get("video_versions", [{}])[0].get("url")
+                    media_url = node.get("video_url")
                 else:
-                    media_url = post.get("image_versions2", {}).get("candidates", [{}])[0].get("url")
+                    media_url = node.get("display_url")
 
                 if not media_url:
                     continue
+
+                caption = node.get("caption", {})
+                caption_text = ""
+                if isinstance(caption, dict):
+                    caption_text = caption.get("text", "")
+                elif isinstance(caption, str):
+                    caption_text = caption
 
                 async with httpx.AsyncClient(timeout=60) as client:
                     media_response = await client.get(media_url)
                     media_bytes = media_response.content
 
                 if is_video:
-                    await update.message.reply_video(video=media_bytes)
+                    await update.message.reply_video(
+                        video=media_bytes,
+                        caption=caption_text[:1024] if caption_text else None
+                    )
                 else:
-                    await update.message.reply_photo(photo=media_bytes)
+                    await update.message.reply_photo(
+                        photo=media_bytes,
+                        caption=caption_text[:1024] if caption_text else None
+                    )
 
                 count += 1
                 await asyncio.sleep(1)
@@ -90,7 +107,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ {str(e)}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
