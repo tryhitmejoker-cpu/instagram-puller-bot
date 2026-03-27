@@ -22,7 +22,7 @@ async def get_user_posts(username: str) -> list:
     data = {
         "username_or_url": f"https://www.instagram.com/{username}/",
         "pagination_token": "",
-        "amount": "50"
+        "amount": "12"
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -32,13 +32,7 @@ async def get_user_posts(username: str) -> list:
         raise Exception(f"API error: {response.status_code} - {response.text}")
 
     result = response.json()
-    if "error" in result:
-        raise Exception(result["error"])
-
-    items = result.get("data", {}).get("items", [])
-    if not items:
-        items = result.get("items", [])
-    return items
+    raise Exception(f"RAW RESPONSE: {str(result)[:500]}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -96,7 +90,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"❌ {str(e)}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
