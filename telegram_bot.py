@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import logging
-import os
 import asyncio
 import httpx
 from telegram import Update
@@ -14,25 +13,32 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 async def get_user_posts(username: str) -> list:
-    url = "https://instagram-scraper-stable-api.p.rapidapi.com/ig_get_user_posts.php"
+    url = "https://instagram-scraper-stable-api.p.rapidapi.com/get_ig_user_posts.php"
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": "instagram-scraper-stable-api.p.rapidapi.com",
-        "Content-Type": "application/json"
+        "Content-Type": "application/x-www-form-urlencoded"
     }
-    payload = {"username_or_url": f"https://www.instagram.com/{username}/"}
+    data = {
+        "username_or_url": f"https://www.instagram.com/{username}/",
+        "pagination_token": "",
+        "amount": "50"
+    }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, headers=headers, json=payload)
+        response = await client.post(url, headers=headers, data=data)
 
     if response.status_code != 200:
-        raise Exception(f"API error: {response.status_code}")
+        raise Exception(f"API error: {response.status_code} - {response.text}")
 
-    data = response.json()
-    if "error" in data:
-        raise Exception(data["error"])
+    result = response.json()
+    if "error" in result:
+        raise Exception(result["error"])
 
-    return data.get("data", {}).get("user", {}).get("edge_owner_to_timeline_media", {}).get("edges", [])
+    items = result.get("data", {}).get("items", [])
+    if not items:
+        items = result.get("items", [])
+    return items
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -61,14 +67,16 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = 0
         for post in posts:
             try:
-                node = post.get("node", {})
-                is_video = node.get("is_video", False)
-                media_url = node.get("video_url") if is_video else node.get("display_url")
+                is_video = post.get("media_type") == 2
+                if is_video:
+                    media_url = post.get("video_versions", [{}])[0].get("url")
+                else:
+                    media_url = post.get("image_versions2", {}).get("candidates", [{}])[0].get("url")
 
                 if not media_url:
                     continue
 
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with httpx.AsyncClient(timeout=60) as client:
                     media_response = await client.get(media_url)
                     media_bytes = media_response.content
 
