@@ -22,18 +22,17 @@ async def get_user_posts(username: str) -> list:
     data = {
         "username_or_url": f"https://www.instagram.com/{username}/",
         "pagination_token": "",
-        "amount": "1"
+        "amount": "12"
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(url, headers=headers, data=data)
 
+    if response.status_code != 200:
+        raise Exception(f"API error: {response.status_code}")
+
     result = response.json()
-    posts = result.get("posts", [])
-    if posts:
-        node = posts[0].get("node", {})
-        raise Exception(f"NODE KEYS: {list(node.keys())}")
-    raise Exception("No posts")
+    return result.get("posts", [])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -63,16 +62,8 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for post in posts:
             try:
                 node = post.get("node", {})
-                is_video = node.get("is_video", False)
 
-                if is_video:
-                    media_url = node.get("video_url")
-                else:
-                    media_url = node.get("display_url")
-
-                if not media_url:
-                    continue
-
+                # Get caption
                 caption = node.get("caption", {})
                 caption_text = ""
                 if isinstance(caption, dict):
@@ -80,20 +71,66 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif isinstance(caption, str):
                     caption_text = caption
 
-                async with httpx.AsyncClient(timeout=60) as client:
-                    media_response = await client.get(media_url)
-                    media_bytes = media_response.content
+                # Check media type
+                media_type = node.get("media_type")
+                is_video = media_type == 2
 
-                if is_video:
-                    await update.message.reply_video(
-                        video=media_bytes,
-                        caption=caption_text[:1024] if caption_text else None
-                    )
+                # Handle carousel (multiple images)
+                carousel_media = node.get("carousel_media", [])
+
+                if carousel_media:
+                    # Send each image in carousel
+                    for item in carousel_media:
+                        try:
+                            item_is_video = item.get("media_type") == 2
+                            if item_is_video:
+                                item_url = item.get("video_versions", [{}])[0].get("url")
+                            else:
+                                item_url = item.get("image_versions2", {}).get("candidates", [{}])[0].get("url")
+
+                            if not item_url:
+                                continue
+
+                            async with httpx.AsyncClient(timeout=60) as client:
+                                r = await client.get(item_url)
+                                media_bytes = r.content
+
+                            if item_is_video:
+                                await update.message.reply_video(video=media_bytes)
+                            else:
+                                await update.message.reply_photo(photo=media_bytes)
+
+                            await asyncio.sleep(0.5)
+                        except Exception as e:
+                            logger.error(f"Carousel item error: {e}")
+                            continue
+
+                elif is_video:
+                    video_versions = node.get("video_versions", [])
+                    media_url = video_versions[0].get("url") if video_versions else None
+
+                    if media_url:
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            r = await client.get(media_url)
+                            media_bytes = r.content
+                        await update.message.reply_video(
+                            video=media_bytes,
+                            caption=caption_text[:1024] if caption_text else None
+                        )
+
                 else:
-                    await update.message.reply_photo(
-                        photo=media_bytes,
-                        caption=caption_text[:1024] if caption_text else None
-                    )
+                    # Photo — use image_versions2 or display_uri
+                    image_versions = node.get("image_versions2", {}).get("candidates", [])
+                    media_url = image_versions[0].get("url") if image_versions else node.get("display_uri")
+
+                    if media_url:
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            r = await client.get(media_url)
+                            media_bytes = r.content
+                        await update.message.reply_photo(
+                            photo=media_bytes,
+                            caption=caption_text[:1024] if caption_text else None
+                        )
 
                 count += 1
                 await asyncio.sleep(1)
@@ -106,7 +143,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ {str(e)}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
