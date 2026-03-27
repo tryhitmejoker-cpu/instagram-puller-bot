@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 import logging
+import os
 import asyncio
-import httpx
+import instaloader
+from pathlib import Path
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 
 TELEGRAM_BOT_TOKEN = "8721581325:AAFzOhC1izk6Px2-s_pgVWF2sIdi_8N-7TI"
-RAPIDAPI_KEY = "150c7ebc5bmsh4eed288776c75a2p1dafa9jsnac52f1938a6a"
 ADMIN_USER_ID = 8262267515
+IG_USERNAME = "rabb.it9106871"
+IG_PASSWORD = "Jess9659"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def get_user_posts(username: str) -> list:
-    url = "https://instagram-scraper-stable-api.p.rapidapi.com/get_ig_user_posts.php"
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "instagram-scraper-stable-api.p.rapidapi.com",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {
-        "username_or_url": f"https://www.instagram.com/{username}/",
-        "pagination_token": "",
-        "amount": "12"
-    }
+# Login once at startup
+L = instaloader.Instaloader(
+    download_videos=True,
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    post_metadata_txt_pattern=""
+)
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, headers=headers, data=data)
-
-    if response.status_code != 200:
-        raise Exception(f"API error: {response.status_code}")
-
-    result = response.json()
-    return result.get("posts", [])
+try:
+    L.login(IG_USERNAME, IG_PASSWORD)
+    logger.info("Instagram login successful!")
+except Exception as e:
+    logger.error(f"Instagram login failed: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -49,11 +46,15 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.text.strip().replace("@", "")
     status_msg = await update.message.reply_text(f"🔍 Fetching posts from @{username}... please wait.")
 
+    download_path = Path(f"downloads/{username}")
+    download_path.mkdir(parents=True, exist_ok=True)
+
     try:
-        posts = await get_user_posts(username)
+        profile = instaloader.Profile.from_username(L.context, username)
+        posts = list(profile.get_posts())
 
         if not posts:
-            await status_msg.edit_text(f"❌ No posts found for @{username} or account is private.")
+            await status_msg.edit_text(f"❌ No posts found for @{username}")
             return
 
         await status_msg.edit_text(f"📦 Found {len(posts)} posts! Sending now...")
@@ -61,79 +62,26 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = 0
         for post in posts:
             try:
-                node = post.get("node", {})
+                L.download_post(post, target=download_path)
 
-                # Get caption
-                caption = node.get("caption", {})
-                caption_text = ""
-                if isinstance(caption, dict):
-                    caption_text = caption.get("text", "")
-                elif isinstance(caption, str):
-                    caption_text = caption
-
-                # Check media type
-                media_type = node.get("media_type")
-                is_video = media_type == 2
-
-                # Handle carousel (multiple images)
-                carousel_media = node.get("carousel_media", [])
-
-                if carousel_media:
-                    # Send each image in carousel
-                    for item in carousel_media:
+                files = sorted(download_path.iterdir())
+                for file in files:
+                    if file.suffix in [".jpg", ".jpeg", ".png"]:
+                        with open(file, "rb") as f:
+                            await update.message.reply_photo(photo=f)
+                        file.unlink()
+                    elif file.suffix in [".mp4", ".mov"]:
+                        with open(file, "rb") as f:
+                            await update.message.reply_video(video=f)
+                        file.unlink()
+                    else:
                         try:
-                            item_is_video = item.get("media_type") == 2
-                            if item_is_video:
-                                item_url = item.get("video_versions", [{}])[0].get("url")
-                            else:
-                                item_url = item.get("image_versions2", {}).get("candidates", [{}])[0].get("url")
-
-                            if not item_url:
-                                continue
-
-                            async with httpx.AsyncClient(timeout=60) as client:
-                                r = await client.get(item_url)
-                                media_bytes = r.content
-
-                            if item_is_video:
-                                await update.message.reply_video(video=media_bytes)
-                            else:
-                                await update.message.reply_photo(photo=media_bytes)
-
-                            await asyncio.sleep(0.5)
-                        except Exception as e:
-                            logger.error(f"Carousel item error: {e}")
-                            continue
-
-                elif is_video:
-                    video_versions = node.get("video_versions", [])
-                    media_url = video_versions[0].get("url") if video_versions else None
-
-                    if media_url:
-                        async with httpx.AsyncClient(timeout=60) as client:
-                            r = await client.get(media_url)
-                            media_bytes = r.content
-                        await update.message.reply_video(
-                            video=media_bytes,
-                            caption=caption_text[:1024] if caption_text else None
-                        )
-
-                else:
-                    # Photo — use image_versions2 or display_uri
-                    image_versions = node.get("image_versions2", {}).get("candidates", [])
-                    media_url = image_versions[0].get("url") if image_versions else node.get("display_uri")
-
-                    if media_url:
-                        async with httpx.AsyncClient(timeout=60) as client:
-                            r = await client.get(media_url)
-                            media_bytes = r.content
-                        await update.message.reply_photo(
-                            photo=media_bytes,
-                            caption=caption_text[:1024] if caption_text else None
-                        )
+                            file.unlink()
+                        except:
+                            pass
 
                 count += 1
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
 
             except Exception as e:
                 logger.error(f"Error on post {count}: {e}")
@@ -141,6 +89,8 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"✅ Done! Sent {count} posts from @{username}")
 
+    except instaloader.exceptions.ProfileNotExistsException:
+        await status_msg.edit_text(f"❌ Account @{username} not found or is private.")
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text(f"❌ Error: {str(e)}")
